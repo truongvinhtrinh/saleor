@@ -213,18 +213,8 @@ if not SECRET_KEY and DEBUG:
     warnings.warn("SECRET_KEY not configured, using a random temporary key.")
     SECRET_KEY = get_random_secret_key()
 
-MIDDLEWARE = [
-    "django.middleware.security.SecurityMiddleware",
-    "django.middleware.common.CommonMiddleware",
-    "saleor.core.middleware.request_time",
-    "saleor.core.middleware.discounts",
-    "saleor.core.middleware.google_analytics",
-    "saleor.core.middleware.site",
-    "saleor.core.middleware.plugins",
-    "saleor.core.middleware.jwt_refresh_token_middleware",
-]
-
 INSTALLED_APPS = [
+    "corsheaders",
     # External apps that need to go before django's
     "storages",
     # Django modules
@@ -268,6 +258,23 @@ INSTALLED_APPS = [
     "django_countries",
     "django_filters",
     "phonenumber_field",
+]
+
+MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "saleor.core.middleware.request_time",
+    "saleor.core.middleware.discounts",
+    "saleor.core.middleware.google_analytics",
+    "saleor.core.middleware.site",
+    "saleor.core.middleware.plugins",
+    "saleor.core.middleware.jwt_refresh_token_middleware",
+]
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:9000"
 ]
 
 ENABLE_DJANGO_EXTENSIONS = get_bool_from_env("ENABLE_DJANGO_EXTENSIONS", False)
