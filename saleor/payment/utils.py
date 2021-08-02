@@ -1,13 +1,15 @@
 import json
 import logging
 from decimal import Decimal
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import graphene
+from babel.numbers import get_currency_precision
 from django.core.serializers.json import DjangoJSONEncoder
 
 from ..account.models import User
 from ..checkout.models import Checkout
+from ..core.prices import quantize_price
 from ..core.tracing import traced_atomic_transaction
 from ..order.models import Order
 from . import ChargeStatus, GatewayError, PaymentError, TransactionKind
@@ -37,14 +39,19 @@ def create_payment_information(
     Returns information required to process payment and additional
     billing/shipping addresses for optional fraud-prevention mechanisms.
     """
-    if payment.checkout:
-        billing = payment.checkout.billing_address
-        shipping = payment.checkout.shipping_address
+    checkout = payment.checkout
+    if checkout:
+        billing = checkout.billing_address
+        shipping = checkout.shipping_address
+        email = checkout.get_customer_email()
+        user_id = checkout.user_id
     elif payment.order:
         billing = payment.order.billing_address
         shipping = payment.order.shipping_address
+        email = payment.order.user_email
+        user_id = payment.order.user_id
     else:
-        billing, shipping = None, None
+        billing, shipping, email, user_id = None, None, payment.billing_email, None
 
     billing_address = AddressData(**billing.as_data()) if billing else None
     shipping_address = AddressData(**shipping.as_data()) if shipping else None
@@ -52,7 +59,12 @@ def create_payment_information(
     order_id = payment.order.pk if payment.order else None
     graphql_payment_id = graphene.Node.to_global_id("Payment", payment.pk)
 
+    graphql_customer_id = None
+    if user_id:
+        graphql_customer_id = graphene.Node.to_global_id("User", user_id)
+
     return PaymentData(
+        gateway=payment.gateway,
         token=payment_token,
         amount=amount or payment.total,
         currency=payment.currency,
@@ -63,9 +75,10 @@ def create_payment_information(
         graphql_payment_id=graphql_payment_id,
         customer_ip_address=payment.customer_ip_address,
         customer_id=customer_id,
-        customer_email=payment.billing_email,
+        customer_email=email,
         reuse_source=store_source,
         data=additional_data or {},
+        graphql_customer_id=graphql_customer_id,
     )
 
 
@@ -248,10 +261,6 @@ def validate_gateway_response(response: GatewayResponse):
 @traced_atomic_transaction()
 def gateway_postprocess(transaction, payment):
     changed_fields = []
-    psp_reference = transaction.gateway_response.get("pspReference")
-    if psp_reference:
-        payment.psp_reference = psp_reference
-        changed_fields.append("psp_reference")
 
     if not transaction.is_success or transaction.already_processed:
         if changed_fields:
@@ -294,6 +303,7 @@ def gateway_postprocess(transaction, payment):
         payment.captured_amount -= transaction.amount
         payment.charge_status = ChargeStatus.PARTIALLY_REFUNDED
         if payment.captured_amount <= 0:
+            payment.captured_amount = Decimal("0.0")
             payment.charge_status = ChargeStatus.FULLY_REFUNDED
             payment.is_active = False
         changed_fields += ["charge_status", "is_active"]
@@ -302,7 +312,8 @@ def gateway_postprocess(transaction, payment):
         changed_fields += ["charge_status"]
     elif transaction_kind == TransactionKind.CANCEL:
         payment.charge_status = ChargeStatus.CANCELLED
-        changed_fields += ["charge_status"]
+        payment.is_active = False
+        changed_fields += ["charge_status", "is_active"]
     elif transaction_kind == TransactionKind.CAPTURE_FAILED:
         if payment.charge_status in {
             ChargeStatus.PARTIALLY_CHARGED,
@@ -338,10 +349,22 @@ def prepare_key_for_gateway_customer_id(gateway_name: str) -> str:
     return (gateway_name.strip().upper()) + ".customer_id"
 
 
-def update_payment_method_details(
-    payment: "Payment", gateway_response: "GatewayResponse"
-):
+def update_payment(payment: "Payment", gateway_response: "GatewayResponse"):
     changed_fields = []
+    if psp_reference := gateway_response.psp_reference:
+        payment.psp_reference = psp_reference
+        changed_fields.append("psp_reference")
+
+    if gateway_response.payment_method_info:
+        _update_payment_method_details(payment, gateway_response, changed_fields)
+
+    if changed_fields:
+        payment.save(update_fields=changed_fields)
+
+
+def _update_payment_method_details(
+    payment: "Payment", gateway_response: "GatewayResponse", changed_fields: List[str]
+):
     if not gateway_response.payment_method_info:
         return
     if gateway_response.payment_method_info.brand:
@@ -359,8 +382,6 @@ def update_payment_method_details(
     if gateway_response.payment_method_info.type:
         payment.payment_method_type = gateway_response.payment_method_info.type
         changed_fields.append("payment_method_type")
-    if changed_fields:
-        payment.save(update_fields=changed_fields)
 
 
 def get_payment_token(payment: Payment):
@@ -376,3 +397,29 @@ def is_currency_supported(currency: str, gateway_id: str, manager: "PluginsManag
     """Return true if the given gateway supports given currency."""
     available_gateways = manager.list_payment_gateways(currency=currency)
     return any([gateway.id == gateway_id for gateway in available_gateways])
+
+
+def price_from_minor_unit(value: str, currency: str):
+    """Convert minor unit (smallest unit of currency) to decimal value.
+
+    (value: 1000, currency: USD) will be converted to 10.00
+    """
+
+    value = Decimal(value)
+    precision = get_currency_precision(currency)
+    number_places = Decimal(10) ** -precision
+    return value * number_places
+
+
+def price_to_minor_unit(value: Decimal, currency: str):
+    """Convert decimal value to the smallest unit of currency.
+
+    Take the value, discover the precision of currency and multiply value by
+    Decimal('10.0'), then change quantization to remove the comma.
+    Decimal(10.0) -> str(1000)
+    """
+    value = quantize_price(value, currency=currency)
+    precision = get_currency_precision(currency)
+    number_places = Decimal("10.0") ** precision
+    value_without_comma = value * number_places
+    return str(value_without_comma.quantize(Decimal("1")))

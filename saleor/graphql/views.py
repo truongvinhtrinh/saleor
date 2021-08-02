@@ -104,15 +104,20 @@ class GraphQLView(View):
                         "HTTP_ORIGIN"
                     ]
                     response["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-                    response[
-                        "Access-Control-Allow-Headers"
-                    ] = "Origin, Content-Type, Accept, Authorization"
+                    response["Access-Control-Allow-Headers"] = (
+                        "Origin, Content-Type, Accept, Authorization, "
+                        "Authorization-Bearer"
+                    )
                     response["Access-Control-Allow-Credentials"] = "true"
                     break
         return response
 
     def render_playground(self, request):
-        return render(request, "graphql/playground.html", {})
+        return render(
+            request,
+            "graphql/playground.html",
+            {"api_url": request.build_absolute_uri(str(API_PATH))},
+        )
 
     def _handle_query(self, request: HttpRequest) -> JsonResponse:
         try:

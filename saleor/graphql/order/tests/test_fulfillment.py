@@ -24,7 +24,7 @@ mutation fulfillOrder(
             code
             message
             warehouse
-            orderLine
+            orderLines
         }
     }
 }
@@ -77,7 +77,7 @@ def test_order_fulfill(
         ]
     }
     mock_create_fulfillments.assert_called_once_with(
-        staff_user, order, fulfillment_lines_for_warehouses, ANY, True
+        staff_user, None, order, fulfillment_lines_for_warehouses, ANY, True
     )
 
 
@@ -127,7 +127,12 @@ def test_order_fulfill_as_app(
         ]
     }
     mock_create_fulfillments.assert_called_once_with(
-        AnonymousUser(), order, fulfillment_lines_for_warehouses, ANY, True
+        AnonymousUser(),
+        app_api_client.app,
+        order,
+        fulfillment_lines_for_warehouses,
+        ANY,
+        True,
     )
 
 
@@ -186,7 +191,7 @@ def test_order_fulfill_many_warehouses(
     }
 
     mock_create_fulfillments.assert_called_once_with(
-        staff_user, order, fulfillment_lines_for_warehouses, ANY, True
+        staff_user, None, order, fulfillment_lines_for_warehouses, ANY, True
     )
 
 
@@ -228,7 +233,7 @@ def test_order_fulfill_without_notification(
         str(warehouse.pk): [{"order_line": order_line, "quantity": 1}]
     }
     mock_create_fulfillments.assert_called_once_with(
-        staff_user, order, fulfillment_lines_for_warehouses, ANY, False
+        staff_user, None, order, fulfillment_lines_for_warehouses, ANY, False
     )
 
 
@@ -286,7 +291,7 @@ def test_order_fulfill_lines_with_empty_quantity(
         str(warehouse.pk): [{"order_line": order_line2, "quantity": 2}]
     }
     mock_create_fulfillments.assert_called_once_with(
-        staff_user, order, fulfillment_lines_for_warehouses, ANY, True
+        staff_user, None, order, fulfillment_lines_for_warehouses, ANY, True
     )
 
 
@@ -324,7 +329,7 @@ def test_order_fulfill_zero_quantity(
     error = data["errors"][0]
     assert error["field"] == "lines"
     assert error["code"] == OrderErrorCode.ZERO_QUANTITY.name
-    assert not error["orderLine"]
+    assert not error["orderLines"]
     assert not error["warehouse"]
 
     mock_create_fulfillments.assert_not_called()
@@ -400,7 +405,7 @@ def test_order_fulfill_fulfilled_order(
     error = data["errors"][0]
     assert error["field"] == "orderLineId"
     assert error["code"] == OrderErrorCode.FULFILL_ORDER_LINE.name
-    assert error["orderLine"] == order_line_id
+    assert error["orderLines"] == [order_line_id]
     assert not error["warehouse"]
 
     mock_create_fulfillments.assert_not_called()
@@ -453,7 +458,7 @@ def test_order_fulfill_warehouse_with_insufficient_stock_exception(
     error = data["errors"][0]
     assert error["field"] == "stocks"
     assert error["code"] == OrderErrorCode.INSUFFICIENT_STOCK.name
-    assert error["orderLine"] == order_line_id
+    assert error["orderLines"] == [order_line_id]
     assert error["warehouse"] == warehouse_id
 
 
@@ -494,7 +499,7 @@ def test_order_fulfill_warehouse_duplicated_warehouse_id(
     error = data["errors"][0]
     assert error["field"] == "warehouse"
     assert error["code"] == OrderErrorCode.DUPLICATED_INPUT_ITEM.name
-    assert not error["orderLine"]
+    assert not error["orderLines"]
     assert error["warehouse"] == warehouse_id
     mock_create_fulfillments.assert_not_called()
 
@@ -537,7 +542,7 @@ def test_order_fulfill_warehouse_duplicated_order_line_id(
     error = data["errors"][0]
     assert error["field"] == "orderLineId"
     assert error["code"] == OrderErrorCode.DUPLICATED_INPUT_ITEM.name
-    assert error["orderLine"] == order_line_id
+    assert error["orderLines"] == [order_line_id]
     assert not error["warehouse"]
     mock_create_fulfillments.assert_not_called()
 

@@ -12,11 +12,11 @@ from ...payment import gateway
 from ...payment.utils import fetch_customer_id
 from ..core.utils import from_global_id_or_error
 from ..utils import format_permissions_for_display, get_user_or_app_from_context
-from ..utils.filters import filter_by_query_param
-from .types import AddressValidationData, ChoiceValue
+from .types import Address, AddressValidationData, ChoiceValue, User
 from .utils import (
     get_allowed_fields_camel_case,
     get_required_fields_camel_case,
+    get_upper_fields_camel_case,
     get_user_permissions,
 )
 
@@ -31,27 +31,20 @@ USER_SEARCH_FIELDS = (
 )
 
 
-@traced_resolver
-def resolve_customers(info, query, **_kwargs):
-    qs = models.User.objects.customers()
-    qs = filter_by_query_param(
-        queryset=qs, query=query, search_fields=USER_SEARCH_FIELDS
-    )
-    return qs.distinct()
+def resolve_customers(info, **_kwargs):
+    return models.User.objects.customers()
 
 
-@traced_resolver
+def resolve_permission_group(id):
+    return auth_models.Group.objects.filter(id=id).first()
+
+
 def resolve_permission_groups(info, **_kwargs):
     return auth_models.Group.objects.all()
 
 
-@traced_resolver
-def resolve_staff_users(info, query, **_kwargs):
-    qs = models.User.objects.staff()
-    qs = filter_by_query_param(
-        queryset=qs, query=query, search_fields=USER_SEARCH_FIELDS
-    )
-    return qs.distinct()
+def resolve_staff_users(info, **_kwargs):
+    return models.User.objects.staff()
 
 
 @traced_resolver
@@ -60,7 +53,7 @@ def resolve_user(info, id=None, email=None):
     if requester:
         filter_kwargs = {}
         if id:
-            _model, filter_kwargs["pk"] = from_global_id_or_error(id)
+            _model, filter_kwargs["pk"] = from_global_id_or_error(id, User)
         if email:
             filter_kwargs["email"] = email
         if requester.has_perms(
@@ -97,14 +90,14 @@ def resolve_address_validation_rules(
         address_latin_format=rules.address_latin_format,
         allowed_fields=get_allowed_fields_camel_case(rules.allowed_fields),
         required_fields=get_required_fields_camel_case(rules.required_fields),
-        upper_fields=rules.upper_fields,
+        upper_fields=get_upper_fields_camel_case(rules.upper_fields),
         country_area_type=rules.country_area_type,
         country_area_choices=[
             ChoiceValue(area[0], area[1]) for area in rules.country_area_choices
         ],
         city_type=rules.city_type,
         city_choices=[ChoiceValue(area[0], area[1]) for area in rules.city_choices],
-        city_area_type=rules.city_type,
+        city_area_type=rules.city_area_type,
         city_area_choices=[
             ChoiceValue(area[0], area[1]) for area in rules.city_area_choices
         ],
@@ -145,12 +138,13 @@ def prepare_graphql_payment_sources_type(payment_sources):
         sources.append(
             {
                 "gateway": src.gateway,
+                "payment_method_id": src.id,
                 "credit_card_info": {
                     "last_digits": src.credit_card_info.last_4,
                     "exp_year": src.credit_card_info.exp_year,
                     "exp_month": src.credit_card_info.exp_month,
-                    "brand": "",
-                    "first_digits": "",
+                    "brand": src.credit_card_info.brand,
+                    "first_digits": src.credit_card_info.first_4,
                 },
             }
         )
@@ -161,7 +155,7 @@ def prepare_graphql_payment_sources_type(payment_sources):
 def resolve_address(info, id):
     user = info.context.user
     app = info.context.app
-    _model, address_pk = from_global_id_or_error(id)
+    _model, address_pk = from_global_id_or_error(id, Address)
     if app and app.has_perm(AccountPermissions.MANAGE_USERS):
         return models.Address.objects.filter(pk=address_pk).first()
     if user and not user.is_anonymous:

@@ -14,7 +14,6 @@ from ...shipping.tasks import drop_invalid_shipping_methods_relations_for_given_
 from ..core.mutations import BaseMutation, ModelDeleteMutation, ModelMutation
 from ..core.types.common import ChannelError, ChannelErrorCode
 from ..core.utils import get_duplicated_values, get_duplicates_ids
-from ..utils import resolve_global_ids_to_primary_keys
 from ..utils.validators import check_for_duplicates
 from .types import Channel
 
@@ -139,7 +138,7 @@ class ChannelUpdate(ModelMutation):
 
 
 class ChannelDeleteInput(graphene.InputObjectType):
-    target_channel = graphene.ID(
+    channel_id = graphene.ID(
         required=True,
         description="ID of channel to migrate orders from origin channel.",
     )
@@ -166,10 +165,9 @@ class ChannelDelete(ModelDeleteMutation):
         if origin_channel.id == target_channel.id:
             raise ValidationError(
                 {
-                    "target_channel": ValidationError(
-                        "channelID and targetChannelID cannot be the same. "
-                        "Use different target channel ID.",
-                        code=ChannelErrorCode.CHANNEL_TARGET_ID_MUST_BE_DIFFERENT,
+                    "channel_id": ValidationError(
+                        "Cannot migrate data to the channel that is being removed.",
+                        code=ChannelErrorCode.INVALID,
                     )
                 }
             )
@@ -178,7 +176,7 @@ class ChannelDelete(ModelDeleteMutation):
         if origin_channel_currency != target_channel_currency:
             raise ValidationError(
                 {
-                    "target_channel": ValidationError(
+                    "channel_id": ValidationError(
                         f"Cannot migrate from {origin_channel_currency} "
                         f"to {target_channel_currency}. "
                         "Migration are allowed between the same currency",
@@ -225,7 +223,7 @@ class ChannelDelete(ModelDeleteMutation):
     @classmethod
     def perform_mutation(cls, _root, info, **data):
         origin_channel = cls.get_node_or_error(info, data["id"], only_type=Channel)
-        target_channel_global_id = data.get("input", {}).get("target_channel")
+        target_channel_global_id = data.get("input", {}).get("channel_id")
         if target_channel_global_id:
             target_channel = cls.get_node_or_error(
                 info, target_channel_global_id, only_type=Channel
@@ -306,8 +304,8 @@ class BaseChannelListingMutation(BaseMutation):
             channels_to_add = cls.get_nodes_or_error(  # type: ignore
                 add_channels_ids, "channel_id", Channel
             )
-        _, remove_channels_pks = resolve_global_ids_to_primary_keys(
-            remove_channels_ids, Channel
+        remove_channels_pks = cls.get_global_ids_or_error(
+            remove_channels_ids, Channel, field="remove_channels"
         )
 
         cleaned_input = {input_source: [], "remove_channels": remove_channels_pks}

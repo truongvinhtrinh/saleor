@@ -1,5 +1,4 @@
 import graphene
-from graphql.error import GraphQLError
 
 from saleor.core.tracing import traced_resolver
 
@@ -90,13 +89,16 @@ from .mutations.products import (
 )
 from .resolvers import (
     resolve_categories,
+    resolve_category_by_id,
     resolve_category_by_slug,
     resolve_collection_by_id,
     resolve_collection_by_slug,
     resolve_collections,
+    resolve_digital_content_by_id,
     resolve_digital_contents,
     resolve_product_by_id,
     resolve_product_by_slug,
+    resolve_product_type_by_id,
     resolve_product_types,
     resolve_product_variant_by_sku,
     resolve_product_variants,
@@ -108,7 +110,6 @@ from .sorters import (
     CategorySortingInput,
     CollectionSortingInput,
     ProductOrder,
-    ProductOrderField,
     ProductTypeSortingInput,
 )
 from .types import (
@@ -251,7 +252,8 @@ class ProductQueries(graphene.ObjectType):
     def resolve_category(self, info, id=None, slug=None, **kwargs):
         validate_one_of_args_is_in_query("id", id, "slug", slug)
         if id:
-            return graphene.Node.get_node_from_global_id(info, id, Category)
+            _, id = from_global_id_or_error(id, Category)
+            return resolve_category_by_id(id)
         if slug:
             return resolve_category_by_slug(slug=slug)
 
@@ -264,7 +266,7 @@ class ProductQueries(graphene.ObjectType):
         if channel is None and not is_staff:
             channel = get_default_channel_slug_or_graphql_error()
         if id:
-            _, id = from_global_id_or_error(id)
+            _, id = from_global_id_or_error(id, Collection)
             collection = resolve_collection_by_id(info, id, channel, requestor)
         else:
             collection = resolve_collection_by_slug(
@@ -285,7 +287,8 @@ class ProductQueries(graphene.ObjectType):
 
     @permission_required(ProductPermissions.MANAGE_PRODUCTS)
     def resolve_digital_content(self, info, id):
-        return graphene.Node.get_node_from_global_id(info, id, DigitalContent)
+        _, id = from_global_id_or_error(id, DigitalContent)
+        return resolve_digital_content_by_id(id)
 
     @permission_required(ProductPermissions.MANAGE_PRODUCTS)
     def resolve_digital_contents(self, info, **_kwargs):
@@ -300,7 +303,7 @@ class ProductQueries(graphene.ObjectType):
         if channel is None and not is_staff:
             channel = get_default_channel_slug_or_graphql_error()
         if id:
-            _type, id = from_global_id_or_error(id, only_type="Product")
+            _type, id = from_global_id_or_error(id, Product)
             product = resolve_product_by_id(
                 info, id, channel_slug=channel, requestor=requestor
             )
@@ -312,24 +315,14 @@ class ProductQueries(graphene.ObjectType):
 
     @traced_resolver
     def resolve_products(self, info, channel=None, **kwargs):
-        # sort by RANK can be used only with search filter
-        if "sort_by" in kwargs and ProductOrderField.RANK == kwargs["sort_by"].get(
-            "field"
-        ):
-            if (
-                "filter" not in kwargs
-                or kwargs["filter"].get("search") is None
-                or not kwargs["filter"]["search"].strip()
-            ):
-                raise GraphQLError("Sorting by Rank is available only with searching.")
-
         requestor = get_user_or_app_from_context(info.context)
         if channel is None and not requestor_is_staff_member_or_app(requestor):
             channel = get_default_channel_slug_or_graphql_error()
         return resolve_products(info, requestor, channel_slug=channel, **kwargs)
 
     def resolve_product_type(self, info, id, **_kwargs):
-        return graphene.Node.get_node_from_global_id(info, id, ProductType)
+        _, id = from_global_id_or_error(id, ProductType)
+        return resolve_product_type_by_id(id)
 
     def resolve_product_types(self, info, **kwargs):
         return resolve_product_types(info, **kwargs)
@@ -348,7 +341,7 @@ class ProductQueries(graphene.ObjectType):
         if channel is None and not is_staff:
             channel = get_default_channel_slug_or_graphql_error()
         if id:
-            _, id = from_global_id_or_error(id)
+            _, id = from_global_id_or_error(id, ProductVariant)
             variant = resolve_variant_by_id(
                 info,
                 id,

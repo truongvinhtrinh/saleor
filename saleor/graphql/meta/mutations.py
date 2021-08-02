@@ -2,10 +2,12 @@ from typing import List
 
 import graphene
 from django.core.exceptions import ValidationError
+from graphql.error.base import GraphQLError
 
 from ...core import models
 from ...core.error_codes import MetadataErrorCode
 from ...core.exceptions import PermissionDenied
+from ...discount import models as discount_models
 from ...menu import models as menu_models
 from ...product import models as product_models
 from ...shipping import models as shipping_models
@@ -102,6 +104,11 @@ class BaseMetadataMutation(BaseMutation):
     def mutate(cls, root, info, **data):
         try:
             permissions = cls.get_permissions(info, **data)
+        except GraphQLError as e:
+            error = ValidationError(
+                {"id": ValidationError(str(e), code="graphql_error")}
+            )
+            return cls.handle_errors(error)
         except ValidationError as e:
             return cls.handle_errors(e)
         if not cls.check_permissions(info.context, permissions):
@@ -133,13 +140,15 @@ class BaseMetadataMutation(BaseMutation):
             [
                 isinstance(instance, Model)
                 for Model in [
-                    product_models.Product,
-                    product_models.ProductVariant,
-                    product_models.Collection,
-                    shipping_models.ShippingMethod,
-                    shipping_models.ShippingZone,
+                    discount_models.Sale,
+                    discount_models.Voucher,
                     menu_models.Menu,
                     menu_models.MenuItem,
+                    product_models.Collection,
+                    product_models.Product,
+                    product_models.ProductVariant,
+                    shipping_models.ShippingMethod,
+                    shipping_models.ShippingZone,
                 ]
             ]
         )

@@ -1,8 +1,9 @@
-import datetime
+from datetime import date, datetime
 from unittest import mock
 
 import graphene
 import pytest
+import pytz
 from django.utils import timezone
 from django.utils.text import slugify
 from freezegun import freeze_time
@@ -14,7 +15,7 @@ from ....page.models import Page, PageType
 from ....tests.utils import dummy_editorjs
 from ....webhook.event_types import WebhookEventType
 from ....webhook.payloads import generate_page_payload
-from ...tests.utils import get_graphql_content
+from ...tests.utils import get_graphql_content, get_graphql_content_from_response
 
 PAGE_QUERY = """
     query PageQuery($id: ID, $slug: String) {
@@ -129,6 +130,23 @@ def test_staff_query_unpublished_page(staff_api_client, page):
     assert content["data"]["page"] is not None
 
 
+def test_staff_query_page_by_invalid_id(staff_api_client, page):
+    id = "bh/"
+    variables = {"id": id}
+    response = staff_api_client.post_graphql(PAGE_QUERY, variables)
+    content = get_graphql_content_from_response(response)
+    assert len(content["errors"]) == 1
+    assert content["errors"][0]["message"] == f"Couldn't resolve id: {id}."
+    assert content["data"]["page"] is None
+
+
+def test_staff_query_page_with_invalid_object_type(staff_api_client, page):
+    variables = {"id": graphene.Node.to_global_id("Order", page.id)}
+    response = staff_api_client.post_graphql(PAGE_QUERY, variables)
+    content = get_graphql_content(response)
+    assert content["data"]["page"] is None
+
+
 def test_get_page_with_sorted_attribute_values(
     staff_api_client,
     page,
@@ -207,6 +225,8 @@ CREATE_PAGE_MUTATION = """
                         slug
                         name
                         reference
+                        date
+                        dateTime
                         file {
                             url
                             contentType
@@ -495,8 +515,13 @@ def test_create_page_with_file_attribute(
             {
                 "slug": f"{attr_value.slug}-2",
                 "name": attr_value.name,
-                "file": {"url": attr_value.file_url, "contentType": None},
+                "file": {
+                    "url": f"http://testserver/media/{attr_value.file_url}",
+                    "contentType": None,
+                },
                 "reference": None,
+                "date": None,
+                "dateTime": None,
             }
         ],
     }
@@ -570,6 +595,8 @@ def test_create_page_with_file_attribute_new_attribute_value(
                     "url": "http://testserver/media/" + new_value,
                     "contentType": new_value_content_type,
                 },
+                "date": None,
+                "dateTime": None,
             }
         ],
     }
@@ -731,6 +758,8 @@ def test_create_page_with_page_reference_attribute(
                 "file": None,
                 "name": page.title,
                 "reference": reference,
+                "date": None,
+                "dateTime": None,
             }
         ],
     }
@@ -738,6 +767,120 @@ def test_create_page_with_page_reference_attribute(
 
     page_type_page_reference_attribute.refresh_from_db()
     assert page_type_page_reference_attribute.values.count() == values_count + 1
+
+
+@freeze_time(datetime(2020, 5, 5, 5, 5, 5, tzinfo=pytz.utc))
+def test_create_page_with_date_attribute(
+    staff_api_client,
+    permission_manage_pages,
+    page_type,
+    date_attribute,
+    page,
+):
+    # given
+    page_type.page_attributes.add(date_attribute)
+
+    page_title = "test title"
+    page_type_id = graphene.Node.to_global_id("PageType", page_type.pk)
+    date_attribute_id = graphene.Node.to_global_id("Attribute", date_attribute.id)
+    date_time_value = datetime.now(tz=pytz.utc)
+    date_value = date_time_value.date()
+
+    variables = {
+        "title": page_title,
+        "pageType": page_type_id,
+        "attributes": [
+            {"id": date_attribute_id, "date": date_value},
+        ],
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CREATE_PAGE_MUTATION, variables, permissions=[permission_manage_pages]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["pageCreate"]
+    errors = data["errors"]
+
+    assert not errors
+    assert data["page"]["title"] == page_title
+    assert data["page"]["pageType"]["id"] == page_type_id
+    page_id = data["page"]["id"]
+    _, new_page_pk = graphene.Node.from_global_id(page_id)
+    expected_attributes_data = {
+        "attribute": {"slug": "release-date"},
+        "values": [
+            {
+                "file": None,
+                "reference": None,
+                "dateTime": None,
+                "date": str(date_value),
+                "name": str(date_value),
+                "slug": f"{new_page_pk}_{date_attribute.id}",
+            }
+        ],
+    }
+
+    assert expected_attributes_data in data["page"]["attributes"]
+
+
+@freeze_time(datetime(2020, 5, 5, 5, 5, 5, tzinfo=pytz.utc))
+def test_create_page_with_date_time_attribute(
+    staff_api_client,
+    permission_manage_pages,
+    page_type,
+    date_time_attribute,
+    page,
+):
+    # given
+    page_type.page_attributes.add(date_time_attribute)
+
+    page_title = "test title"
+    page_type_id = graphene.Node.to_global_id("PageType", page_type.pk)
+    date_time_attribute_id = graphene.Node.to_global_id(
+        "Attribute", date_time_attribute.id
+    )
+    date_time_value = datetime.now(tz=pytz.utc)
+    variables = {
+        "title": page_title,
+        "pageType": page_type_id,
+        "attributes": [
+            {"id": date_time_attribute_id, "dateTime": date_time_value},
+        ],
+    }
+
+    # when
+    response = staff_api_client.post_graphql(
+        CREATE_PAGE_MUTATION, variables, permissions=[permission_manage_pages]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["pageCreate"]
+    errors = data["errors"]
+
+    assert not errors
+    assert data["page"]["title"] == page_title
+    assert data["page"]["pageType"]["id"] == page_type_id
+    page_id = data["page"]["id"]
+    _, new_page_pk = graphene.Node.from_global_id(page_id)
+    expected_attributes_data = {
+        "attribute": {"slug": "release-date-time"},
+        "values": [
+            {
+                "file": None,
+                "reference": None,
+                "dateTime": date_time_value.isoformat(),
+                "date": None,
+                "name": str(date_time_value),
+                "slug": f"{new_page_pk}_{date_time_attribute.id}",
+            }
+        ],
+    }
+
+    assert expected_attributes_data in data["page"]["attributes"]
 
 
 def test_create_page_with_page_reference_attribute_not_required_no_references_given(
@@ -902,6 +1045,8 @@ def test_create_page_with_product_reference_attribute(
                 "file": None,
                 "name": product.name,
                 "reference": reference,
+                "dateTime": None,
+                "date": None,
             }
         ],
     }
@@ -1062,6 +1207,38 @@ def test_page_delete_trigger_webhook(
     )
 
 
+@mock.patch("saleor.attribute.signals.delete_from_storage_task.delay")
+def test_page_delete_with_file_attribute(
+    delete_from_storage_task_mock,
+    staff_api_client,
+    page,
+    permission_manage_pages,
+    page_file_attribute,
+):
+    # given
+    page_type = page.page_type
+    page_type.page_attributes.add(page_file_attribute)
+    existing_value = page_file_attribute.values.first()
+    associate_attribute_values_to_instance(page, page_file_attribute, existing_value)
+
+    variables = {"id": graphene.Node.to_global_id("Page", page.id)}
+
+    # when
+    response = staff_api_client.post_graphql(
+        PAGE_DELETE_MUTATION, variables, permissions=[permission_manage_pages]
+    )
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["pageDelete"]
+    assert data["page"]["title"] == page.title
+    with pytest.raises(page._meta.model.DoesNotExist):
+        page.refresh_from_db()
+    with pytest.raises(existing_value._meta.model.DoesNotExist):
+        existing_value.refresh_from_db()
+    delete_from_storage_task_mock.assert_called_once_with(existing_value.file_url)
+
+
 UPDATE_PAGE_MUTATION = """
     mutation updatePage(
         $id: ID!, $input: PageInput!
@@ -1203,7 +1380,7 @@ def test_update_page_trigger_webhook(
     assert not data["errors"]
     assert data["page"]["title"] == page_title
     assert data["page"]["slug"] == new_slug
-    page.publication_date = datetime.date(2020, 3, 18)
+    page.publication_date = date(2020, 3, 18)
     expected_data = generate_page_payload(page)
 
     mocked_webhook_trigger.assert_called_once_with(
@@ -1303,7 +1480,7 @@ def test_update_page_with_file_attribute_new_value_is_not_created(
                 "name": existing_value.name,
                 "reference": None,
                 "file": {
-                    "url": existing_value.file_url,
+                    "url": f"http://testserver/media/{existing_value.file_url}",
                     "contentType": existing_value.content_type,
                 },
             }
@@ -1878,10 +2055,10 @@ QUERY_PAGES_WITH_FILTER = """
 @pytest.mark.parametrize(
     "page_filter, count",
     [
-        ({"search": "Page1"}, 1),
-        ({"search": "slug_page_2"}, 1),
+        ({"search": "Page1"}, 2),
+        ({"search": "about"}, 1),
         ({"search": "test"}, 1),
-        ({"search": "slug_"}, 3),
+        ({"search": "slug"}, 3),
         ({"search": "Page"}, 2),
     ],
 )

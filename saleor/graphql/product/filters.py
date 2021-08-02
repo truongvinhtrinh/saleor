@@ -6,6 +6,7 @@ import django_filters
 import graphene
 from django.contrib.postgres.search import SearchQuery, SearchRank
 from django.db.models import Exists, F, FloatField, OuterRef, Q, Subquery, Sum
+from django.db.models.fields import IntegerField
 from django.db.models.functions import Cast, Coalesce
 from graphene_django.filter import GlobalIDMultipleChoiceFilter
 
@@ -29,7 +30,7 @@ from ...product.models import (
     ProductVariant,
     ProductVariantChannelListing,
 )
-from ...warehouse.models import Stock
+from ...warehouse.models import Allocation, Stock
 from ..channel.filters import get_channel_slug_from_filter_data
 from ..core.filters import (
     EnumFilter,
@@ -37,7 +38,7 @@ from ..core.filters import (
     MetadataFilterBase,
     ObjectTypeFilter,
 )
-from ..core.types import ChannelFilterInputObjectType, FilterInputObjectType
+from ..core.types import FilterInputObjectType
 from ..core.types.common import IntRangeInput, PriceRangeInput
 from ..utils import resolve_global_ids_to_primary_keys
 from ..utils.filters import filter_fields_containing_value, filter_range_field
@@ -109,6 +110,63 @@ def _clean_product_attributes_range_filter_input(filter_value, queries):
         queries[attr_pk] += attr_val_pks
 
 
+def _clean_product_attributes_date_time_range_filter_input(
+    filter_value, queries, *, is_date=False
+):
+    attribute_slugs = [slug for slug, _ in filter_value]
+    attributes = Attribute.objects.filter(slug__in=attribute_slugs).prefetch_related(
+        "values"
+    )
+    values_map = {
+        attr.slug: {
+            "pk": attr.pk,
+            "values": {val.date_time: val.pk for val in attr.values.all()},
+        }
+        for attr in attributes
+    }
+    for attr_slug, val_range in filter_value:
+        attr_pk = values_map[attr_slug]["pk"]
+        attr_values = values_map[attr_slug]["values"]
+        gte = val_range.get("gte")
+        lte = val_range.get("lte")
+        matching_values_pk = []
+
+        for value, pk in attr_values.items():
+            if is_date:
+                value = value.date()
+
+            if gte and lte:
+                if gte <= value <= lte:
+                    matching_values_pk.append(pk)
+            elif gte:
+                if gte <= value:
+                    matching_values_pk.append(pk)
+            elif lte >= value:
+                matching_values_pk.append(pk)
+
+        queries[attr_pk] += matching_values_pk
+
+
+def _clean_product_attributes_boolean_filter_input(filter_value, queries):
+    attribute_slugs = [slug for slug, _ in filter_value]
+    attributes = Attribute.objects.filter(
+        input_type=AttributeInputType.BOOLEAN, slug__in=attribute_slugs
+    ).prefetch_related("values")
+    values_map = {
+        attr.slug: {
+            "pk": attr.pk,
+            "values": {val.boolean: val.pk for val in attr.values.all()},
+        }
+        for attr in attributes
+    }
+
+    for attr_slug, val in filter_value:
+        attr_pk = values_map[attr_slug]["pk"]
+        value_pk = values_map[attr_slug]["values"].get(val)
+        if value_pk:
+            queries[attr_pk] += [value_pk]
+
+
 def filter_products_by_attributes_values(qs, queries: T_PRODUCT_FILTER_QUERIES):
     filters = []
     for values in queries.values():
@@ -144,13 +202,32 @@ def filter_products_by_attributes_values(qs, queries: T_PRODUCT_FILTER_QUERIES):
     return qs.filter(*filters)
 
 
-def filter_products_by_attributes(qs, filter_values, filter_range_values):
+def filter_products_by_attributes(
+    qs,
+    filter_values,
+    filter_range_values,
+    filter_boolean_values,
+    date_range_list,
+    date_time_range_list,
+):
     queries: Dict[int, List[Optional[int]]] = defaultdict(list)
     try:
         if filter_values:
             _clean_product_attributes_filter_input(filter_values, queries)
         if filter_range_values:
             _clean_product_attributes_range_filter_input(filter_range_values, queries)
+        if date_range_list:
+            _clean_product_attributes_date_time_range_filter_input(
+                date_range_list, queries, is_date=True
+            )
+        if date_time_range_list:
+            _clean_product_attributes_date_time_range_filter_input(
+                date_time_range_list, queries
+            )
+        if filter_boolean_values:
+            _clean_product_attributes_boolean_filter_input(
+                filter_boolean_values, queries
+            )
     except ValueError:
         return Product.objects.none()
     return filter_products_by_attributes_values(qs, queries)
@@ -215,38 +292,57 @@ def filter_products_by_collections(qs, collection_pks):
 
 
 def filter_products_by_stock_availability(qs, stock_availability, channel_slug):
-    total_stock = (
-        Stock.objects.for_channel(channel_slug)
-        .select_related("product_variant")
-        .values("product_variant__product_id")
-        .annotate(
-            total_quantity_allocated=Coalesce(Sum("allocations__quantity_allocated"), 0)
-        )
-        .annotate(total_quantity=Coalesce(Sum("quantity"), 0))
-        .annotate(total_available=F("total_quantity") - F("total_quantity_allocated"))
-        .filter(
-            total_available__lte=0,
-        )
-        .values_list("product_variant__product_id", flat=True)
+    allocations = (
+        Allocation.objects.values("stock_id")
+        .filter(quantity_allocated__gt=0, stock_id=OuterRef("pk"))
+        .values_list(Sum("quantity_allocated"))
     )
+    allocated_subquery = Subquery(queryset=allocations, output_field=IntegerField())
+
+    stocks = list(
+        Stock.objects.for_channel(channel_slug)
+        .filter(quantity__gt=Coalesce(allocated_subquery, 0))
+        .values_list("product_variant_id", flat=True)
+    )
+
+    variants = ProductVariant.objects.filter(pk__in=stocks).values("product_id")
+
     if stock_availability == StockAvailability.IN_STOCK:
-        qs = qs.exclude(id__in=Subquery(total_stock))
-    elif stock_availability == StockAvailability.OUT_OF_STOCK:
-        qs = qs.filter(id__in=Subquery(total_stock))
+        qs = qs.filter(Exists(variants.filter(product_id=OuterRef("pk"))))
+    if stock_availability == StockAvailability.OUT_OF_STOCK:
+        qs = qs.filter(~Exists(variants.filter(product_id=OuterRef("pk"))))
     return qs
 
 
 def _filter_attributes(qs, _, value):
     if value:
         value_list = []
+        boolean_list = []
         value_range_list = []
+        date_range_list = []
+        date_time_range_list = []
+
         for v in value:
             slug = v["slug"]
             if "values" in v:
                 value_list.append((slug, v["values"]))
             elif "values_range" in v:
                 value_range_list.append((slug, v["values_range"]))
-        qs = filter_products_by_attributes(qs, value_list, value_range_list)
+            elif "date" in v:
+                date_range_list.append((slug, v["date"]))
+            elif "date_time" in v:
+                date_time_range_list.append((slug, v["date_time"]))
+            elif "boolean" in v:
+                boolean_list.append((slug, v["boolean"]))
+
+        qs = filter_products_by_attributes(
+            qs,
+            value_list,
+            value_range_list,
+            boolean_list,
+            date_range_list,
+            date_time_range_list,
+        )
     return qs
 
 
@@ -293,7 +389,20 @@ def _filter_products_is_published(qs, _, value, channel_slug):
     product_channel_listings = ProductChannelListing.objects.filter(
         Exists(channel.filter(pk=OuterRef("channel_id"))), is_published=value
     ).values("product_id")
-    return qs.filter(Exists(product_channel_listings.filter(product_id=OuterRef("pk"))))
+
+    # Filter out product for which there is no variant with price
+    variant_channel_listings = ProductVariantChannelListing.objects.filter(
+        Exists(channel.filter(pk=OuterRef("channel_id"))),
+        price_amount__isnull=False,
+    ).values("id")
+    variants = ProductVariant.objects.filter(
+        Exists(variant_channel_listings.filter(variant_id=OuterRef("pk")))
+    ).values("product_id")
+
+    return qs.filter(
+        Exists(product_channel_listings.filter(product_id=OuterRef("pk"))),
+        Exists(variants.filter(product_id=OuterRef("pk"))),
+    )
 
 
 def _filter_variant_price(qs, _, value, channel_slug):
@@ -553,7 +662,7 @@ class ProductTypeFilter(MetadataFilterBase):
         fields = ["search", "configurable", "product_type"]
 
 
-class ProductFilterInput(ChannelFilterInputObjectType):
+class ProductFilterInput(FilterInputObjectType):
     class Meta:
         filterset_class = ProductFilter
 
@@ -563,7 +672,7 @@ class ProductVariantFilterInput(FilterInputObjectType):
         filterset_class = ProductVariantFilter
 
 
-class CollectionFilterInput(ChannelFilterInputObjectType):
+class CollectionFilterInput(FilterInputObjectType):
     class Meta:
         filterset_class = CollectionFilter
 

@@ -66,8 +66,10 @@ class CustomerDeleteMixin(UserDeleteMixin):
 
     @classmethod
     def post_process(cls, info, deleted_count=1):
-        account_events.staff_user_deleted_a_customer_event(
-            staff_user=info.context.user, deleted_count=deleted_count
+        account_events.customer_deleted_event(
+            staff_user=info.context.user,
+            app=info.context.app,
+            deleted_count=deleted_count,
         )
 
 
@@ -152,6 +154,11 @@ class StaffDeleteMixin(UserDeleteMixin):
 def get_required_fields_camel_case(required_fields: set) -> set:
     """Return set of AddressValidationRules required fields in camel case."""
     return {validation_field_to_camel_case(field) for field in required_fields}
+
+
+def get_upper_fields_camel_case(upper_fields: set) -> set:
+    """Return set of AddressValidationRules upper fields in camel case."""
+    return {validation_field_to_camel_case(field) for field in upper_fields}
 
 
 def validation_field_to_camel_case(name: str) -> str:
